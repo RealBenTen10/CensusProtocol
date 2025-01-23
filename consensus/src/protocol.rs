@@ -1,6 +1,9 @@
 //! Contains the network-message-types for the consensus protocol and banking application.
 use crate::network::Channel;
 
+use std::time::{Duration, Instant};
+use rand::Rng;
+
 /// Message-type of the network protocol.
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -91,6 +94,7 @@ pub struct RaftNode {
 	pub message_queue: Arc<Mutex<Vec<(u64, RaftMessage)>>>,
 	pub votes: HashMap<u64, bool>,
 	pub leader_id: u64,
+	last_heartbeat: Instant,
 }
 
 impl RaftNode {
@@ -109,6 +113,7 @@ impl RaftNode {
 			message_queue: Arc::new(Mutex::new(Vec::new())),
 			votes: HashMap::new(),
 			leader_id: 1,
+			last_heartbeat: Instant::now(),
 		}
 	}
 
