@@ -5,7 +5,7 @@ use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Constant that causes an artificial delay in the relaying of messages.
-const NETWORK_DELAY: Duration = Duration::from_millis(10);
+const NETWORK_DELAY: Duration = Duration::from_millis(0);
 
 /// Virtual node in a virtual network.
 pub struct NetworkNode<T> {

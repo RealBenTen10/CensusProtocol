@@ -82,7 +82,7 @@ fn main() -> io::Result<()> {
 	let copy = channels.clone();
 	
 	// activate the thread responsible for the disruption of connections
-	thread::spawn(move || daemon(copy, 1.0, 1.0));
+	thread::spawn(move || daemon(copy, 0.0, 0.0));
 	
 	// sample script for your convenience
 	script! {

@@ -23,6 +23,270 @@ pub enum Command {
 }
 
 // TODO: add other useful structures and implementations
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use serde::{Serialize, Deserialize};
+
+/// Raft states
+#[derive(Debug, Clone, PartialEq)]
+pub enum RaftState {
+	Follower,
+	Candidate,
+	Leader,
+}
+
+/// Raft message types
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RaftMessage {
+	RequestVote {
+		term: u64,
+		candidate_id: u64,
+		last_log_index: u64,
+		last_log_term: u64,
+	},
+	VoteResponse {
+		term: u64,
+		vote_granted: bool,
+	},
+	AppendEntries {
+		term: u64,
+		leader_id: u64,
+		prev_log_index: u64,
+		prev_log_term: u64,
+		entries: Vec<LogEntry>,
+		leader_commit: u64,
+	},
+	AppendResponse {
+		term: u64,
+		index: u64,
+		id: u64,
+		success: bool,
+	},
+}
+
+/// Log entry structure
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LogEntry {
+	pub term: u64,
+	pub command: String,
+}
+
+/// Raft node structure
+pub struct RaftNode {
+	pub id: u64,
+	pub state: RaftState,
+	pub current_term: u64,
+	pub voted_for: Option<u64>,
+	pub log: Vec<LogEntry>,
+	pub commit_index: u64,
+	pub last_applied: u64,
+	pub next_index: HashMap<u64, u64>,
+	pub match_index: HashMap<u64, u64>,
+	pub peers: Vec<u64>,
+	pub message_queue: Arc<Mutex<Vec<(u64, RaftMessage)>>>,
+	pub votes: HashMap<u64, bool>,
+}
+
+impl RaftNode {
+	pub fn new(id: u64, peers: Vec<u64>) -> Self {
+		Self {
+			id,
+			state: RaftState::Follower,
+			current_term: 0,
+			voted_for: None,
+			log: Vec::new(),
+			commit_index: 0,
+			last_applied: 0,
+			next_index: HashMap::new(),
+			match_index: HashMap::new(),
+			peers,
+			message_queue: Arc::new(Mutex::new(Vec::new())),
+			votes: HashMap::new(),
+		}
+	}
+
+	/// Handles incoming messages
+	pub fn handle_message(&mut self, src: u64, message: RaftMessage) {
+		match message {
+			RaftMessage::RequestVote {
+				term,
+				candidate_id,
+				last_log_index,
+				last_log_term,
+			} => {
+				self.handle_request_vote(src, term, candidate_id, last_log_index, last_log_term);
+			}
+			RaftMessage::AppendEntries {
+				term,
+				leader_id,
+				prev_log_index,
+				prev_log_term,
+				entries,
+				leader_commit,
+			} => {
+				self.handle_append_entries(
+					src,
+					term,
+					leader_id,
+					prev_log_index,
+					prev_log_term,
+					entries,
+					leader_commit,
+				);
+			}
+			_ => {}
+		}
+	}
+
+	/// Handles RequestVote RPC
+	fn handle_request_vote(&mut self, _src: u64, term: u64, candidate_id: u64, last_log_index: u64, last_log_term: u64) {
+		if term > self.current_term {
+			self.current_term = term;
+			self.voted_for = None;
+			self.state = RaftState::Follower;
+		}
+
+		let vote_granted = if self.voted_for.is_none() || self.voted_for == Some(candidate_id) {
+			let log_ok = self.log.last().map_or(true, |entry| {
+				entry.term < last_log_term || (entry.term == last_log_term && self.log.len() as u64 <= last_log_index)
+			});
+			log_ok
+		} else {
+			false
+		};
+
+		if vote_granted {
+			self.voted_for = Some(candidate_id);
+		}
+
+		self.send_message(
+			_src,
+			RaftMessage::VoteResponse {
+				term: self.current_term,
+				vote_granted,
+			},
+		);
+	}
+
+	/// Handles AppendEntries RPC
+	fn handle_append_entries(&mut self, _src: u64, term: u64, leader_id: u64, prev_log_index: u64, prev_log_term: u64, entries: Vec<LogEntry>, leader_commit: u64) {
+		if term >= self.current_term {
+			self.current_term = term;
+			self.state = RaftState::Follower;
+		}
+
+		let success = if let Some(entry) = self.log.get(prev_log_index as usize) {
+			entry.term == prev_log_term
+		} else {
+			prev_log_index == 0
+		};
+
+		if success {
+			self.log.truncate(prev_log_index as usize + 1);
+			self.log.extend(entries);
+			self.commit_index = leader_commit.min(self.log.len() as u64);
+		}
+
+		self.send_message(
+			_src,
+			RaftMessage::AppendResponse {
+				term: self.current_term,
+				index: prev_log_index + 1,
+				id: self.id,
+				success,
+			},
+		);
+	}
+
+	/// Sends a message to a specific peer
+	fn send_message(&self, target: u64, message: RaftMessage) {
+		let mut queue = self.message_queue.lock().unwrap();
+		queue.push((target, message));
+	}
+	/// Starts a new election by transitioning to Candidate state.
+	pub fn start_election(&mut self) {
+		self.current_term += 1;
+		self.voted_for = Some(self.id);
+		self.state = RaftState::Candidate;
+
+		let votes_needed = (self.peers.len() as u64 + 1) / 2 + 1; // Majority
+		let mut votes = 1; // Self-vote
+
+		// Send RequestVote to all peers
+		for &peer in &self.peers {
+			self.send_message(
+				peer,
+				RaftMessage::RequestVote {
+					term: self.current_term,
+					candidate_id: self.id,
+					last_log_index: self.log.len() as u64 - 1,
+					last_log_term: self.log.last().map_or(0, |entry| entry.term),
+				},
+			);
+		}
+
+		// Collect votes
+		if votes >= votes_needed {
+			self.become_leader();
+		}
+	}
+
+	/// Handles a VoteResponse.
+	pub fn handle_vote_response(&mut self, _src: u64, term: u64, vote_granted: bool) {
+		if term == self.current_term && vote_granted {
+			let votes_needed = (self.peers.len() as u64 + 1) / 2 + 1;
+			let votes: u64 = self.votes.iter().filter(|&(_, &v)| v).count() as u64;
+
+			if votes >= votes_needed {
+				self.become_leader();
+			}
+		} else if term > self.current_term {
+			self.become_follower(term);
+		}
+	}
+
+	/// Becomes the leader.
+	pub fn become_leader(&mut self) {
+		self.state = RaftState::Leader;
+		for &peer in &self.peers {
+			self.next_index.insert(peer, self.log.len() as u64);
+			self.match_index.insert(peer, 0);
+		}
+		self.send_heartbeat();
+	}
+
+	/// Becomes a follower.
+	pub fn become_follower(&mut self, term: u64) {
+		self.state = RaftState::Follower;
+		self.current_term = term;
+		self.voted_for = None;
+	}
+
+	/// Sends periodic heartbeats.
+	pub fn send_heartbeat(&mut self) {
+		for &peer in &self.peers {
+			self.send_message(
+				peer,
+				RaftMessage::AppendEntries {
+					term: self.current_term,
+					leader_id: self.id,
+					prev_log_index: self.log.len() as u64 - 1,
+					prev_log_term: self.log.last().map_or(0, |entry| entry.term),
+					entries: vec![],
+					leader_commit: self.commit_index,
+				},
+			);
+		}
+	}
+
+	/// Handles timeouts for follower state.
+	pub fn handle_timeout(&mut self) {
+		if self.state == RaftState::Follower {
+			self.start_election();
+		}
+	}
+}
+
 
 /// Helper macro for defining test-scenarios.
 /// 
