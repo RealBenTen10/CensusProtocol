@@ -2,7 +2,7 @@
 use crate::network::Channel;
 
 /// Message-type of the network protocol.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Command {
 	/// Open an account with a unique name.
 	Open { account: String },
@@ -18,14 +18,18 @@ pub enum Command {
 	
 	/// Accept a new network connection.
 	Accept(Channel<Command>),
+
+	RaftMessage(Box<RaftMessage>),
 	
 	// TODO: add other useful control messages
 }
+
 
 // TODO: add other useful structures and implementations
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
+use tracing::debug;
 
 /// Raft states
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +40,7 @@ pub enum RaftState {
 }
 
 /// Raft message types
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum RaftMessage {
 	RequestVote {
 		term: u64,
@@ -62,6 +66,7 @@ pub enum RaftMessage {
 		id: u64,
 		success: bool,
 	},
+	ClientRequest(Box<Command>),
 }
 
 /// Log entry structure
@@ -85,12 +90,13 @@ pub struct RaftNode {
 	pub peers: Vec<u64>,
 	pub message_queue: Arc<Mutex<Vec<(u64, RaftMessage)>>>,
 	pub votes: HashMap<u64, bool>,
+	pub leader_id: u64,
 }
 
 impl RaftNode {
 	pub fn new(id: u64, peers: Vec<u64>) -> Self {
 		Self {
-			id,
+			id: (id + 1),
 			state: RaftState::Follower,
 			current_term: 0,
 			voted_for: None,
@@ -102,40 +108,44 @@ impl RaftNode {
 			peers,
 			message_queue: Arc::new(Mutex::new(Vec::new())),
 			votes: HashMap::new(),
+			leader_id: 1,
 		}
 	}
 
 	/// Handles incoming messages
 	pub fn handle_message(&mut self, src: u64, message: RaftMessage) {
-		match message {
-			RaftMessage::RequestVote {
-				term,
-				candidate_id,
-				last_log_index,
-				last_log_term,
-			} => {
-				self.handle_request_vote(src, term, candidate_id, last_log_index, last_log_term);
-			}
-			RaftMessage::AppendEntries {
-				term,
-				leader_id,
-				prev_log_index,
-				prev_log_term,
-				entries,
-				leader_commit,
-			} => {
-				self.handle_append_entries(
-					src,
+		if src == self.leader_id {
+			match message {
+				RaftMessage::RequestVote {
+					term,
+					candidate_id,
+					last_log_index,
+					last_log_term,
+				} => {
+					self.handle_request_vote(src, term, candidate_id, last_log_index, last_log_term);
+				}
+				RaftMessage::AppendEntries {
 					term,
 					leader_id,
 					prev_log_index,
 					prev_log_term,
 					entries,
 					leader_commit,
-				);
+				} => {
+					self.handle_append_entries(
+						src,
+						term,
+						leader_id,
+						prev_log_index,
+						prev_log_term,
+						entries,
+						leader_commit,
+					);
+				}
+				_ => {}
 			}
-			_ => {}
 		}
+		else { debug!("MESSAGE NOT FROM LEADER!") }
 	}
 
 	/// Handles RequestVote RPC
@@ -173,6 +183,7 @@ impl RaftNode {
 		if term >= self.current_term {
 			self.current_term = term;
 			self.state = RaftState::Follower;
+			self.leader_id = leader_id;
 		}
 
 		let success = if let Some(entry) = self.log.get(prev_log_index as usize) {
@@ -210,7 +221,7 @@ impl RaftNode {
 		self.state = RaftState::Candidate;
 
 		let votes_needed = (self.peers.len() as u64 + 1) / 2 + 1; // Majority
-		let mut votes = 1; // Self-vote
+		let votes = 1; // Self-vote
 
 		// Send RequestVote to all peers
 		for &peer in &self.peers {
@@ -247,14 +258,16 @@ impl RaftNode {
 
 	/// Becomes the leader.
 	pub fn become_leader(&mut self) {
-		self.state = RaftState::Leader;
-		for &peer in &self.peers {
-			self.next_index.insert(peer, self.log.len() as u64);
-			self.match_index.insert(peer, 0);
+		if self.state == RaftState::Candidate {
+			self.state = RaftState::Leader;
+			self.leader_id = self.id;
+			for &peer in &self.peers {
+				self.next_index.insert(peer, self.log.len() as u64 + 1);
+				self.match_index.insert(peer, 0);
+			}
+			self.send_heartbeat();
 		}
-		self.send_heartbeat();
 	}
-
 	/// Becomes a follower.
 	pub fn become_follower(&mut self, term: u64) {
 		self.state = RaftState::Follower;

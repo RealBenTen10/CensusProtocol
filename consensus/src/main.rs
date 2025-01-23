@@ -1,16 +1,20 @@
 //! Implementation of the Raft Consensus Protocol for a banking application.
 
 use std::{env::args, fs, io, thread};
-
+use std::thread::sleep;
+use std::time::Duration;
 use rand::prelude::*;
 #[allow(unused_imports)]
 use tracing::{debug, info, Level, trace, trace_span};
-
+use std::collections::HashMap;
+use std::ops::{Add, Sub};
+use crate::protocol::{RaftNode, RaftState};
 use network::{Channel, daemon, NetworkNode};
 use protocol::Command;
 
 pub mod network;
 pub mod protocol;
+
 
 /// Creates and connects a number of branch offices for the bank.
 pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Channel<Command>>> {
@@ -21,35 +25,81 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 	
 	// create various network nodes and start them
 	for address in 0..office_count {
-		let node = NetworkNode::new(address, &log_path)?;
+		let node: NetworkNode<Command> = NetworkNode::new(address, office_count, &log_path)?;
+		debug!("Node: {}", node.address);
 		channels.push(node.channel());
 		
 		thread::spawn(move || {
 			// configure a span to associate log-entries with this network node
 			let _guard = trace_span!("NetworkNode", id = node.address);
 			let _guard = _guard.enter();
-			
+
+			// State for this branch office
+			let mut accounts: HashMap<String, usize> = HashMap::new();
+
 			// dispatching event loop
 			while let Ok(cmd) = node.decode(None) {
-				match cmd {
-					// customer requests
-					Command::Open { account } => {
-						debug!("request to open an account for {:?}", account);
+				if node.raft_node.state == RaftState::Leader {
+					match cmd {
+						// customer requests
+						Command::Open { account } => {
+							if accounts.contains_key(&account) {
+								debug!("Account {:?} already exists", account);
+							} else {
+								accounts.insert(account.clone(), 0);
+								debug!("Opened account for {:?}", account);
+							}
+						}
+						Command::Deposit { account, amount} => {
+							if let Some(balance) = accounts.get_mut(&account) {
+								*balance += amount;
+								debug!("Deposited {} to {:?}, new balance: {}", amount, account, *balance);
+							} else {
+								debug!("Account {:?} does not exist", account);
+							}
+						}
+						Command::Withdraw { account, amount } => {
+							if let Some(balance) = accounts.get_mut(&account) {
+								if *balance >= amount {
+									*balance -= amount;
+									debug!("Withdrew {} from {:?}, new balance: {}", amount, account, *balance);
+								} else {
+									debug!("Insufficient funds in account {:?}", account);
+								}
+							} else {
+								debug!("Account {:?} does not exist", account);
+							}
+						}
+						Command::Transfer { src, dst, amount } => {
+							if src == dst || !accounts.contains_key(&dst) || !accounts.contains_key(&src){
+								debug!("Cannot transfer to the same account");
+							} else {
+								let src_balance = accounts.get(&src).cloned();
+								if let Some(balance) = src_balance {
+									if balance >= amount{
+										accounts.get_mut(&src).unwrap().sub(amount);
+										accounts.get_mut(&dst).unwrap().add(amount);
+										debug!("Transferred {} from {:?} to {:?}", amount, src, dst);
+									} else if balance < amount {
+										debug!("Insufficient funds in source account {:?}", src);
+									} else {
+										debug!("Destination account {:?} does not exist", dst);
+									}
+								} else {
+									debug!("Source account {:?} does not exist", src);
+								}
+							}
+						}
+
+						// control messages
+						Command::Accept(channel) => {
+							trace!(origin = channel.address, "accepted connection");
+						},
+						_ => { debug!{"Command not found"} }
 					}
-					Command::Deposit { account, amount } => {
-						debug!(amount, ?account, "request to deposit");
-					}
-					Command::Withdraw { account, amount } => {
-						debug!(amount, ?account, "request to withdraw");
-					}
-					Command::Transfer { src, dst, amount } => {
-						debug!(amount, ?src, ?dst, "request to transfer");
-					}
-					
-					// control messages
-					Command::Accept(channel) => {
-						trace!(origin = channel.address, "accepted connection");
-					}
+				}
+				else {
+					node.forward_to_leader(cmd);
 				}
 			}
 		});
@@ -80,10 +130,12 @@ fn main() -> io::Result<()> {
 	// create and connect a number of offices
 	let channels = setup_offices(6, &log_path)?;
 	let copy = channels.clone();
-	
+
+	// wait for a short while such that all server are connected
+	sleep(Duration::from_millis(100));
+
 	// activate the thread responsible for the disruption of connections
 	thread::spawn(move || daemon(copy, 0.0, 0.0));
-	
 	// sample script for your convenience
 	script! {
 		// tell the macro which collection of channels to use

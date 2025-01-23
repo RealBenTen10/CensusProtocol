@@ -3,6 +3,7 @@
 use std::{cell::Cell, fmt, fs, io::{self, Write}, path, time::{Instant, Duration}};
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::protocol::{RaftNode, RaftState, Command, RaftMessage};
 
 /// Constant that causes an artificial delay in the relaying of messages.
 const NETWORK_DELAY: Duration = Duration::from_millis(0);
@@ -11,21 +12,23 @@ const NETWORK_DELAY: Duration = Duration::from_millis(0);
 pub struct NetworkNode<T> {
 	/// This node's partition number.
 	/// Can only communicate with nodes in the same partition.
-	partition: Arc<AtomicUsize>,
+	pub partition: Arc<AtomicUsize>,
 	
 	/// The unreliable channel. Local sends *always* succeed.
 	/// MPSC to bypass dealing with multiplexing multiple connections.
-	channel: (mpsc::Sender<T>, mpsc::Receiver<T>),
+	pub channel: (mpsc::Sender<T>, mpsc::Receiver<T>),
 	
 	/// Public (unique) address of this node.
 	/// Useful to identify this node in messages to other nodes.
 	pub address: usize,
 	
 	/// Logfile to store committed entries in.
-	log_file: fs::File,
+	pub log_file: fs::File,
 	
 	/// Number of entries in the logfile.
-	log_entry_no: Cell<u32>
+	pub log_entry_no: Cell<u32>,
+
+	pub raft_node: RaftNode,
 }
 
 /// Reliable channel to a network node.
@@ -58,13 +61,14 @@ pub struct Connection<T> {
 
 impl<T> NetworkNode<T> {
 	/// Creates a new network node and stores logfile in the specified path.
-	pub fn new<P: AsRef<path::Path>>(address: usize, path: P) -> io::Result<Self> {
+	pub fn new<P: AsRef<path::Path>>(address: usize, office_count: usize, path: P) -> io::Result<Self> {
 		Ok(Self {
 			partition: Arc::new(AtomicUsize::new(0)),
 			channel: mpsc::channel(),
 			address,
 			log_file: fs::File::create(path.as_ref().join(address.to_string() + ".log"))?,
-			log_entry_no: Cell::new(0)
+			log_entry_no: Cell::new(0),
+			raft_node: RaftNode::new(address as u64, (0..office_count).filter(|&i| i != address).map(|i| i as u64).collect()),
 		})
 	}
 	
@@ -132,7 +136,15 @@ impl<T> NetworkNode<T> {
 		
 		self.log_entry_no.set(log_entry_no);
 	}
+
+	pub fn forward_to_leader(&self, command: T) {
+		let leader_id = self.raft_node.leader_id as usize;
+		if let Err(e) = self.channel.0.send(command) {
+			println!("Failed to send Raft message to node: {:?}", e);
+		}
+	}
 }
+
 
 impl<T> Channel<T> {
 	/// Reliably sends a message through the channel.
