@@ -1,8 +1,10 @@
 //! Contains code for locally simulating a network with unreliable connections.
 
 use std::{cell::Cell, fmt, fs, io::{self, Write}, path, time::{Instant, Duration}};
+use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tracing::debug;
 use crate::protocol::{RaftNode, RaftState, Command, RaftMessage};
 
 /// Constant that causes an artificial delay in the relaying of messages.
@@ -29,6 +31,8 @@ pub struct NetworkNode<T> {
 	pub log_entry_no: Cell<u32>,
 
 	pub raft_node: RaftNode,
+
+	pub channels: HashMap<usize, mpsc::Sender<T>>,
 }
 
 /// Reliable channel to a network node.
@@ -69,6 +73,7 @@ impl<T> NetworkNode<T> {
 			log_file: fs::File::create(path.as_ref().join(address.to_string() + ".log"))?,
 			log_entry_no: Cell::new(0),
 			raft_node: RaftNode::new(address as u64, (0..office_count).filter(|&i| i != address).map(|i| i as u64).collect()),
+			channels: HashMap::new(),
 		})
 	}
 	
@@ -84,7 +89,8 @@ impl<T> NetworkNode<T> {
 	/// Upgrades a channel to a fully fledged (unreliable) connection.
 	/// Note: The connection can be relied upon, if the channel was created by
 	/// the same node.
-	pub fn accept(&self, request: Channel<T>) -> Connection<T> {
+	pub fn accept(&mut self, request: Channel<T>) -> Connection<T> {
+
 		Connection {
 			port: request.port,
 			src: self.partition.clone(),
@@ -139,9 +145,22 @@ impl<T> NetworkNode<T> {
 
 	pub fn forward_to_leader(&self, command: T) {
 		let leader_id = self.raft_node.leader_id as usize;
-		if let Err(e) = self.channel.0.send(command) {
-			println!("Failed to send Raft message to node: {:?}", e);
+
+		// Find the channel for the leader node.
+		if let Some(sender) = self.channels.get(&leader_id) {
+			if let Err(e) = sender.send(command) {
+				debug!("Failed to forward command to leader (Node {}): {:?}", leader_id, e);
+			} else {
+				debug!("Command successfully forwarded to leader (Node {}).", leader_id);
+			}
+		} else {
+			debug!("Leader (Node {}) not found in channels. Cannot forward command.", leader_id);
 		}
+	}
+
+	pub fn save_peer_connection(&mut self, peer_channel: Channel<T>) {
+		self.channels.insert(peer_channel.address, peer_channel.port.clone());
+		debug!("Node {} added peer {}", self.address, peer_channel.address);
 	}
 }
 

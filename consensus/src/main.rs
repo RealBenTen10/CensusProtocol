@@ -11,6 +11,7 @@ use std::ops::{Add, Sub};
 use crate::protocol::{RaftNode, RaftState};
 use network::{Channel, daemon, NetworkNode};
 use protocol::Command;
+use crate::protocol::RaftMessage::ClientRequest;
 
 pub mod network;
 pub mod protocol;
@@ -28,6 +29,7 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 		let mut node: NetworkNode<Command> = NetworkNode::new(address, office_count, &log_path)?;
 		debug!("Node: {}", node.address);
 		channels.push(node.channel());
+		let channel_clone = channels.clone();
 		
 		thread::spawn(move || {
 			// configure a span to associate log-entries with this network node
@@ -39,6 +41,7 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 
 			// dispatching event loop
 			while let Ok(cmd) = node.decode(None) {
+				let cmd_clone = cmd.clone();
 				if node.raft_node.state == RaftState::Leader {
 					match cmd {
 						// customer requests
@@ -72,41 +75,53 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 							}
 						}
 						Command::Transfer { src, dst, amount } => {
-							if src == dst || !accounts.contains_key(&dst) || !accounts.contains_key(&src){
-								debug!("Cannot transfer to the same account or account(s) do not exist");
+							if src == dst {
+								debug!("Cannot transfer to the same account");
+							} else if !accounts.contains_key(&src) {
+								debug!("Source account {:?} does not exist", src);
+							} else if !accounts.contains_key(&dst) {
+								debug!("Destination account {:?} does not exist", dst);
 							} else {
-								let src_balance = accounts.get(&src).cloned();
-								if let Some(balance) = src_balance {
-									if balance >= amount{
-										accounts.get_mut(&src).unwrap().sub(amount);
-										accounts.get_mut(&dst).unwrap().add(amount);
-										debug!("Transferred {} from {:?} to {:?}", amount, src, dst);
-									} else if balance < amount {
-										debug!("Insufficient funds in source account {:?}", src);
-									} else {
-										debug!("Destination account {:?} does not exist", dst);
-									}
+								// Scope mutable borrows to avoid simultaneous borrowing
+								let dst_balance = accounts.get(&dst).copied().unwrap_or(0);
+								let src_balance = accounts.get(&src).copied().unwrap_or(0);
+								let src_cloned = src.clone();
+								let dst_cloned = dst.clone();
+								if src_balance >= amount {
+									accounts.insert(src, src_balance-amount);
+									accounts.insert(dst, dst_balance+amount);
+
+									debug!("Transferred {} from {:?} to {:?}. New balances: {:?} => {}, {:?} => {}",amount, src_cloned, dst_cloned, src_cloned, src_balance, dst_cloned, dst_balance);
 								} else {
-									debug!("Source account {:?} does not exist", src);
+									debug!("Insufficient funds in source account {:?}. Available: {}, Required: {}",src_cloned, src_balance, amount);
 								}
 							}
 						}
 
+
+
 						// control messages
 						Command::Accept(channel) => {
 							trace!(origin = channel.address, "accepted connection");
+							node.save_peer_connection(channel);
 						},
 						_ => { debug!{"Command not found"} }
 					}
 					node.raft_node.send_heartbeat();
 				}
 				else {
-					if node.raft_node.leader_id == 0 {
-						node.raft_node.start_election()
+					match cmd {
+						Command::Accept(channel) => {
+							trace!(origin = channel.address, "accepted connection");
+							node.save_peer_connection(channel);
+						},
+						_ => {
+							debug!("Not a leader. Forwarding command to leader...");
+							node.forward_to_leader(cmd);
+						}
 					}
-					node.forward_to_leader(cmd);
-					sleep(time::Duration::from_millis(1000));
-					debug!("Forward to leader")
+					// If not the leader, forward the command to the leader or start an election
+
 				}
 			}
 		});
@@ -144,6 +159,7 @@ fn main() -> io::Result<()> {
 	// activate the thread responsible for the disruption of connections
 	thread::spawn(move || daemon(copy, 0.0, 0.0));
 	// sample script for your convenience
+	sleep(Duration::from_millis(1000));
 	script! {
 		// tell the macro which collection of channels to use
 		use channels;

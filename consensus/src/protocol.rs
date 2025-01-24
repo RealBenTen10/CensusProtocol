@@ -27,9 +27,7 @@ pub enum Command {
 	// TODO: add other useful control messages
 }
 
-impl Command {
 
-}
 
 
 
@@ -75,7 +73,7 @@ pub enum RaftMessage {
 		id: u64,
 		success: bool,
 	},
-	ClientRequest(Box<Command>),
+	ClientRequest(Command),
 }
 
 /// Log entry structure
@@ -125,7 +123,8 @@ impl RaftNode {
 	}
 
 	fn select_first_leader(id: u64) -> RaftState{
-		if id == 0 {return RaftState::Follower}
+		if id != 0 {return RaftState::Follower}
+		debug!("Leader selected: {}", id);
 		RaftState::Leader
 	}
 
