@@ -1,7 +1,7 @@
 //! Contains the network-message-types for the consensus protocol and banking application.
 use crate::network::Channel;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, self};
 use rand::Rng;
 
 /// Message-type of the network protocol.
@@ -27,9 +27,15 @@ pub enum Command {
 	// TODO: add other useful control messages
 }
 
+impl Command {
+
+}
+
+
 
 // TODO: add other useful structures and implementations
 use std::collections::HashMap;
+use std::ops::Sub;
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
 use tracing::debug;
@@ -99,9 +105,10 @@ pub struct RaftNode {
 
 impl RaftNode {
 	pub fn new(id: u64, peers: Vec<u64>) -> Self {
+
 		Self {
 			id: (id + 1),
-			state: RaftState::Follower,
+			state: Self::select_first_leader(id),
 			current_term: 0,
 			voted_for: None,
 			log: Vec::new(),
@@ -112,9 +119,14 @@ impl RaftNode {
 			peers,
 			message_queue: Arc::new(Mutex::new(Vec::new())),
 			votes: HashMap::new(),
-			leader_id: 1,
+			leader_id: 0,
 			last_heartbeat: Instant::now(),
 		}
+	}
+
+	fn select_first_leader(id: u64) -> RaftState{
+		if id == 0 {return RaftState::Follower}
+		RaftState::Leader
 	}
 
 	/// Handles incoming messages
@@ -227,6 +239,8 @@ impl RaftNode {
 
 		let votes_needed = (self.peers.len() as u64 + 1) / 2 + 1; // Majority
 		let votes = 1; // Self-vote
+		let mut log_length: u64 = 0;
+		if self.log.len() > 0 {log_length = self.log.len() as u64 - 1}
 
 		// Send RequestVote to all peers
 		for &peer in &self.peers {
@@ -235,7 +249,7 @@ impl RaftNode {
 				RaftMessage::RequestVote {
 					term: self.current_term,
 					candidate_id: self.id,
-					last_log_index: self.log.len() as u64 - 1,
+					last_log_index: log_length,
 					last_log_term: self.log.last().map_or(0, |entry| entry.term),
 				},
 			);
@@ -282,19 +296,33 @@ impl RaftNode {
 
 	/// Sends periodic heartbeats.
 	pub fn send_heartbeat(&mut self) {
+		let mut log_len: u64 = 0;
+		if self.log.len() > 0 {log_len = self.log.len() as u64 - 1}
 		for &peer in &self.peers {
 			self.send_message(
 				peer,
 				RaftMessage::AppendEntries {
 					term: self.current_term,
 					leader_id: self.id,
-					prev_log_index: self.log.len() as u64 - 1,
+					prev_log_index: log_len,
 					prev_log_term: self.log.last().map_or(0, |entry| entry.term),
 					entries: vec![],
 					leader_commit: self.commit_index,
 				},
 			);
 		}
+	}
+
+	pub fn check_leader_condition(&mut self) {
+		if self.state == RaftState::Leader {self.send_heartbeat()}
+		else {
+			let heartbeat_threshold = time::Duration::from_millis(1000);
+			// let time_elapsed = Instant::now() - self.last_heartbeat;
+			if (self.leader_id == 0 ){
+				self.start_election()
+			}
+		}
+
 	}
 
 	/// Handles timeouts for follower state.

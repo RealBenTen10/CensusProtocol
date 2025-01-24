@@ -1,6 +1,6 @@
 //! Implementation of the Raft Consensus Protocol for a banking application.
 
-use std::{env::args, fs, io, thread};
+use std::{env::args, fs, io, thread, time};
 use std::thread::sleep;
 use std::time::Duration;
 use rand::prelude::*;
@@ -25,7 +25,7 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 	
 	// create various network nodes and start them
 	for address in 0..office_count {
-		let node: NetworkNode<Command> = NetworkNode::new(address, office_count, &log_path)?;
+		let mut node: NetworkNode<Command> = NetworkNode::new(address, office_count, &log_path)?;
 		debug!("Node: {}", node.address);
 		channels.push(node.channel());
 		
@@ -48,6 +48,7 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 							} else {
 								accounts.insert(account.clone(), 0);
 								debug!("Opened account for {:?}", account);
+
 							}
 						}
 						Command::Deposit { account, amount} => {
@@ -72,7 +73,7 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 						}
 						Command::Transfer { src, dst, amount } => {
 							if src == dst || !accounts.contains_key(&dst) || !accounts.contains_key(&src){
-								debug!("Cannot transfer to the same account");
+								debug!("Cannot transfer to the same account or account(s) do not exist");
 							} else {
 								let src_balance = accounts.get(&src).cloned();
 								if let Some(balance) = src_balance {
@@ -97,9 +98,15 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 						},
 						_ => { debug!{"Command not found"} }
 					}
+					node.raft_node.send_heartbeat();
 				}
 				else {
+					if node.raft_node.leader_id == 0 {
+						node.raft_node.start_election()
+					}
 					node.forward_to_leader(cmd);
+					sleep(time::Duration::from_millis(1000));
+					debug!("Forward to leader")
 				}
 			}
 		});
@@ -132,7 +139,7 @@ fn main() -> io::Result<()> {
 	let copy = channels.clone();
 
 	// wait for a short while such that all server are connected
-	sleep(Duration::from_millis(100));
+	sleep(Duration::from_millis(1000));
 
 	// activate the thread responsible for the disruption of connections
 	thread::spawn(move || daemon(copy, 0.0, 0.0));
@@ -140,6 +147,7 @@ fn main() -> io::Result<()> {
 	script! {
 		// tell the macro which collection of channels to use
 		use channels;
+
 		
 		// customer requests start with the branch office index,
 		// followed by the source account name and a list of requests
