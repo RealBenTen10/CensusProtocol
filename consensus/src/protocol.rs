@@ -226,7 +226,7 @@ impl RaftNode {
 	}
 
 	/// Sends a message to a specific peer
-	fn send_message(&self, target: u64, message: RaftMessage) {
+	pub(crate) fn send_message(&self, target: u64, message: RaftMessage) {
 		let mut queue = self.message_queue.lock().unwrap();
 		queue.push((target, message));
 	}

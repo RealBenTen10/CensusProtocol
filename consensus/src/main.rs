@@ -8,7 +8,7 @@ use rand::prelude::*;
 use tracing::{debug, info, Level, trace, trace_span};
 use std::collections::HashMap;
 use std::ops::{Add, Sub};
-use crate::protocol::{RaftNode, RaftState};
+use crate::protocol::{RaftMessage, RaftNode, RaftState};
 use network::{Channel, daemon, NetworkNode};
 use protocol::Command;
 use crate::protocol::RaftMessage::ClientRequest;
@@ -43,6 +43,7 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 			while let Ok(cmd) = node.decode(None) {
 				let cmd_clone = cmd.clone();
 				if node.raft_node.state == RaftState::Leader {
+
 					match cmd {
 						// customer requests
 						Command::Open { account } => {
@@ -50,6 +51,24 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 								debug!("Account {:?} already exists", account);
 							} else {
 								accounts.insert(account.clone(), 0);
+								let log_entry = protocol::LogEntry {
+									term: node.raft_node.current_term,
+									command: format!("{:?}", cmd_clone),
+								};
+								node.raft_node.log.push(log_entry.clone());
+								for &peer in &node.raft_node.peers {
+									node.raft_node.send_message(
+										peer,
+										RaftMessage::AppendEntries {
+											term: node.raft_node.current_term,
+											leader_id: node.raft_node.id,
+											prev_log_index: (node.raft_node.log.len() as u64).saturating_sub(1),
+											prev_log_term: node.raft_node.log.last().map_or(0, |entry| entry.term),
+											entries: vec![log_entry.clone()],
+											leader_commit: node.raft_node.commit_index,
+										},
+									);
+								}
 								debug!("Opened account for {:?}", account);
 
 							}
@@ -98,9 +117,6 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 							}
 						}
 
-
-
-						// control messages
 						Command::Accept(channel) => {
 							trace!(origin = channel.address, "accepted connection");
 							node.save_peer_connection(channel);
