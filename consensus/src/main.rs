@@ -69,14 +69,18 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 										},
 									);
 								}
-								debug!("Opened account for {:?}", account);
+								let string_append = format!("Opened account for {:?}", account);
+								node.append(&string_append);
+								debug!(string_append);
 
 							}
 						}
 						Command::Deposit { account, amount} => {
 							if let Some(balance) = accounts.get_mut(&account) {
 								*balance += amount;
-								debug!("Deposited {} to {:?}, new balance: {}", amount, account, *balance);
+								let string_append = format!("Deposited {} to {:?}, new balance: {}", amount, account, *balance);
+								node.append(&string_append);
+								debug!(string_append);
 							} else {
 								debug!("Account {:?} does not exist", account);
 							}
@@ -85,7 +89,9 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 							if let Some(balance) = accounts.get_mut(&account) {
 								if *balance >= amount {
 									*balance -= amount;
-									debug!("Withdrew {} from {:?}, new balance: {}", amount, account, *balance);
+									let string_append = format!("Withdrew {} from {:?}, new balance: {}", amount, account, *balance);
+									node.append(&string_append);
+									debug!(string_append);
 								} else {
 									debug!("Insufficient funds in account {:?}", account);
 								}
@@ -109,8 +115,12 @@ pub fn setup_offices(office_count: usize, log_path: &str) -> io::Result<Vec<Chan
 								if src_balance >= amount {
 									accounts.insert(src, src_balance-amount);
 									accounts.insert(dst, dst_balance+amount);
-
-									debug!("Transferred {} from {:?} to {:?}. New balances: {:?} => {}, {:?} => {}",amount, src_cloned, dst_cloned, src_cloned, src_balance, dst_cloned, dst_balance);
+									let string_append = format!(
+										"Transferred {} from {:?} to {:?}. New balances: {:?} => {}, {:?} => {}",
+										amount, src_cloned, dst_cloned, src_cloned, src_balance, dst_cloned, dst_balance
+									);
+									node.append(&string_append);
+									debug!(string_append);
 								} else {
 									debug!("Insufficient funds in source account {:?}. Available: {}, Required: {}",src_cloned, src_balance, amount);
 								}
